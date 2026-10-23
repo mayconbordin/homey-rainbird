@@ -35,6 +35,11 @@ cannot connect to such a controller. HTTPS-first with HTTP fallback landed in `r
 
 Requires Node >= 22.12 on the Homey (Homey Pro Early 2023 on firmware 13.5.0 runs Node 24.19).
 
+## Protocol
+
+How the app talks to the controller, and where the (unofficial) documentation lives:
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
 ## Install
 
 ```
