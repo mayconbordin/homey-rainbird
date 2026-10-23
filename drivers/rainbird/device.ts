@@ -1,6 +1,9 @@
 import Homey from 'homey';
 import { Zone } from './models/zone';
 
+const ZONE_CAPABILITY_PREFIX = 'onoff.zone';
+const STOP_CAPABILITY = 'button.stop_irrigation';
+
 class RainbirdDevice extends Homey.Device {
     rainbirdService: any | undefined;
     zones: Zone[] = [];
@@ -11,6 +14,7 @@ class RainbirdDevice extends Homey.Device {
     timeoutId: NodeJS.Timeout | undefined;
     rainDelayDays: number = 0;
     lastRainDelayCheck: number = 0;
+    zoneSwitchListeners = new Set<string>();
 
     getCurrentZoneId = (): number | undefined => {
         const zones = this.rainbirdService?.zones;
@@ -81,6 +85,7 @@ class RainbirdDevice extends Homey.Device {
         }
 
         await this.setCapabilityValue('is_active', isInUse);
+        await this.updateZoneSwitches();
 
         await this.updateRainSetPoint();
         await this.updateRainDelay(initial).catch((e) => this.error('Could not read rain delay', e));
@@ -122,6 +127,10 @@ class RainbirdDevice extends Homey.Device {
         // every new zone start cancelled the running one.
         this.enableQueueing = enableQueueing === true;
         this.log('Getting configured zones', this.zones, 'queueing', this.enableQueueing);
+
+        // Before init(), so the switches are there even while the controller is unreachable.
+        // A failure here must not make the whole device unavailable.
+        await this.syncZoneCapabilities().catch((e) => this.error('Could not set up the zone switches', e));
 
         // eslint-disable-next-line node/no-unsupported-features/es-syntax
         const serviceType = await import('rainbird/dist/RainBird/RainBirdService.js');
@@ -182,6 +191,20 @@ class RainbirdDevice extends Homey.Device {
         if (!this.hasCapability('rain_delay_days')) {
             await this.addCapability('rain_delay_days');
         }
+
+        // Added at runtime rather than in the manifest: Homey refuses setCapabilityOptions
+        // for capabilities whose options come from the manifest.
+        if (!this.hasCapability(STOP_CAPABILITY)) {
+            await this.addCapability(STOP_CAPABILITY);
+            await this.setCapabilityOptions(STOP_CAPABILITY, {
+                title: { en: 'Stop irrigation', nl: 'Irrigatie stoppen' },
+            });
+        }
+        this.registerCapabilityListener(STOP_CAPABILITY, async () => {
+            this.log('Stop irrigation button pressed');
+            await this.stopIrrigation();
+            await this.updateZoneSwitches();
+        });
 
         await this.instantiateController();
     }
@@ -247,6 +270,100 @@ class RainbirdDevice extends Homey.Device {
         this.rainbirdService?.deactivateAllZones();
         await this.rainbirdService?.stopIrrigation();
     }
+
+    /**
+     * One onoff.zone<index> switch per named zone, titled with the zone name. Zones are
+     * configured per device (pairing, repair), so the switches can't live in the manifest.
+     */
+    async syncZoneCapabilities() {
+        const zones = this.zones ?? [];
+        const wanted = new Map(zones.map((zone) => [`${ZONE_CAPABILITY_PREFIX}${zone.index}`, zone]));
+
+        for (const capability of this.getCapabilities()) {
+            if (capability.startsWith(ZONE_CAPABILITY_PREFIX) && !wanted.has(capability)) {
+                await this.removeCapability(capability);
+            }
+        }
+
+        for (const [capability, zone] of wanted) {
+            if (!this.hasCapability(capability)) {
+                await this.addCapability(capability);
+            }
+
+            // setCapabilityOptions is expensive, only call it when the name changed.
+            if (this.zoneSwitchTitle(capability) !== zone.name) {
+                await this.setCapabilityOptions(capability, {
+                    title: { en: zone.name },
+                    uiQuickAction: false,
+                });
+            }
+
+            if (!this.zoneSwitchListeners.has(capability)) {
+                this.registerCapabilityListener(capability, async (value: boolean) => {
+                    await this.onZoneSwitch(capability, value);
+                });
+                this.zoneSwitchListeners.add(capability);
+            }
+        }
+    }
+
+    zoneSwitchTitle(capability: string): string | undefined {
+        try {
+            return this.getCapabilityOptions(capability)?.title?.en;
+        } catch (error) {
+            // Homey throws "Invalid Capability" when reading the options of a capability
+            // that was added during this same onInit.
+            return undefined;
+        }
+    }
+
+    onZoneSwitch = async (capability: string, value: boolean) => {
+        const index = Number(capability.substring(ZONE_CAPABILITY_PREFIX.length));
+        const zone = this.zones.find((z) => z.index === index);
+
+        if (!zone) {
+            throw new Error(`Zone ${index} is not configured`);
+        }
+        if (!this.rainbirdService) {
+            throw new Error('Not connected to the Rain Bird controller');
+        }
+
+        if (value) {
+            await this.startZone({ zone });
+        } else {
+            await this.stopZone({ zone });
+        }
+
+        // Without queueing, starting a zone stops the others; reflect that right away
+        // instead of waiting for the next status poll.
+        await this.updateZoneSwitches(capability);
+    };
+
+    async updateZoneSwitches(skip?: string) {
+        const available: number[] = this.rainbirdService?.zones ?? [];
+
+        for (const zone of this.zones ?? []) {
+            const capability = `${ZONE_CAPABILITY_PREFIX}${zone.index}`;
+            if (capability === skip || !this.hasCapability(capability) || !available.includes(zone.index)) {
+                continue;
+            }
+
+            const active = this.rainbirdService.isActive(zone.index) ?? false;
+            if (this.getCapabilityValue(capability) !== active) {
+                await this.setCapabilityValue(capability, active);
+            }
+        }
+    }
+
+    /**
+     * Called by the driver after the zone names were edited in the repair view, which saves
+     * them with setSettings() and so never reaches onSettings().
+     */
+    public updateZones = async () => {
+        this.zones = this.getSetting('zones') ?? [];
+        await this.syncZoneCapabilities();
+        await this.updateZoneSwitches();
+    };
 
     updateTime = async () => {
         const now = Date.now();

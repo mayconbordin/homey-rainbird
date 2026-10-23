@@ -214,6 +214,7 @@ class RainBirdDriver extends Homey.Driver {
             await device.setSettings({
                 zones,
             });
+            await (device as any).updateZones();
 
             return {
                 success: true,
