@@ -4,6 +4,9 @@ import { Zone } from './models/zone';
 const ZONE_CAPABILITY_PREFIX = 'onoff.zone';
 const STOP_CAPABILITY = 'button.stop_irrigation';
 
+const REFRESH_RATE_SECONDS = 30;
+const STATUS_WATCHDOG_MS = 2 * 60 * 1000;
+
 class RainbirdDevice extends Homey.Device {
     rainbirdService: any | undefined;
     zones: Zone[] = [];
@@ -15,12 +18,22 @@ class RainbirdDevice extends Homey.Device {
     rainDelayDays: number = 0;
     lastRainDelayCheck: number = 0;
     zoneSwitchListeners = new Set<string>();
+    lastStatusAt: number = 0;
+    statusWatchdog: NodeJS.Timeout | undefined;
+
+    /**
+     * A zone started by a controller schedule can be reported as running without a
+     * remaining time (models the library only partly supports), which isActive() misses.
+     */
+    zoneIsOn = (zone: number): boolean => {
+        return Boolean(this.rainbirdService?.isActive(zone) || this.rainbirdService?.isInUse(zone));
+    };
 
     getCurrentZoneId = (): number | undefined => {
         const zones = this.rainbirdService?.zones;
 
         for (const zone of zones ?? []) {
-            if (this.rainbirdService?.isActive(zone)) {
+            if (this.zoneIsOn(zone)) {
                 return zone;
             }
         }
@@ -144,12 +157,20 @@ class RainbirdDevice extends Homey.Device {
             password,
             syncTime: true,
             showRequestResponse: debug ?? false,
-            refreshRate: 30,
+            refreshRate: REFRESH_RATE_SECONDS,
         });
 
         this.log('RainbirdService created');
 
+        // Debug is the library's per-request chatter; the rest is worth having in the app log.
+        this.rainbirdService.on('log', ({ level, message }: { level: string; message: string }) => {
+            if (level !== 'debug') {
+                this.log(`[rainbird ${level}] ${message}`);
+            }
+        });
+
         const metadata = await this.rainbirdService?.init();
+        this.lastStatusAt = Date.now();
 
         if (enableQueueing === 'on') {
             await this.setSettings({ enableQueueing: false });
@@ -168,8 +189,30 @@ class RainbirdDevice extends Homey.Device {
         await this.getCurrentStatus(true);
 
         this.rainbirdService.on('status', () => {
+            this.lastStatusAt = Date.now();
             this.getCurrentStatus().catch((e) => this.error(e));
         });
+
+        this.startStatusWatchdog();
+    }
+
+    /**
+     * The library stops polling for good after one failed status request: the failed read
+     * returns undefined, updateStatus() throws, and performStatusRefresh() swallows the error
+     * without re-arming its timer. Kick it again whenever status goes stale.
+     */
+    startStatusWatchdog() {
+        if (this.statusWatchdog) {
+            this.homey.clearInterval(this.statusWatchdog);
+        }
+
+        this.statusWatchdog = this.homey.setInterval(() => {
+            const staleFor = Date.now() - this.lastStatusAt;
+            if (this.rainbirdService && staleFor > STATUS_WATCHDOG_MS) {
+                this.log(`No controller status for ${Math.round(staleFor / 1000)}s, restarting status polling`);
+                this.rainbirdService.refreshStatus();
+            }
+        }, STATUS_WATCHDOG_MS);
 
         this.rainbirdService.on('rain_sensor_state', async () => {
             this.log('Rain sensor state changed');
@@ -262,6 +305,10 @@ class RainbirdDevice extends Homey.Device {
     async onDeleted() {
         this.log('RainbirdDevice has been deleted');
 
+        if (this.statusWatchdog) {
+            this.homey.clearInterval(this.statusWatchdog);
+        }
+
         this.cancelLoop = true;
         if (this.timeoutId) {
             this.homey.clearTimeout(this.timeoutId);
@@ -348,7 +395,7 @@ class RainbirdDevice extends Homey.Device {
                 continue;
             }
 
-            const active = this.rainbirdService.isActive(zone.index) ?? false;
+            const active = this.zoneIsOn(zone.index);
             if (this.getCapabilityValue(capability) !== active) {
                 await this.setCapabilityValue(capability, active);
             }

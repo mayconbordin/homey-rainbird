@@ -43,5 +43,9 @@
   "1.4.0": {
     "en": "Start and stop each zone from the device page with a switch per zone, plus a Stop irrigation button. Pairing now shows why the connection failed instead of hanging.",
     "nl": "Start en stop elke zone vanaf de apparaatpagina met een schakelaar per zone, plus een knop Irrigatie stoppen. Koppelen toont nu waarom de verbinding mislukte in plaats van te blijven hangen."
+  },
+  "1.4.1": {
+    "en": "Fix device data no longer updating after a single failed status request from the controller. Zones started by a controller schedule are now detected on more models.",
+    "nl": "Apparaatgegevens werden niet meer bijgewerkt na één mislukte statusaanvraag aan de controller. Opgelost. Zones die door een schema van de controller zijn gestart worden nu op meer modellen herkend."
   }
 }
