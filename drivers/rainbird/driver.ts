@@ -3,6 +3,7 @@ import { PairSession } from 'homey/lib/Driver';
 
 import { FormResult } from './models/form-result';
 import { Zone } from './models/zone';
+import { probeController } from './probe';
 
 interface PairResult {
     success: boolean;
@@ -77,6 +78,8 @@ class RainBirdDriver extends Homey.Driver {
     };
 
     connect = async (data: PairData): Promise<PairResult> => {
+        await probeController(data.host, data.password);
+
         // eslint-disable-next-line node/no-unsupported-features/es-syntax
         const serviceType = await import('rainbird/dist/RainBird/RainBirdService.js');
         const { RainBirdService } = serviceType;
@@ -134,7 +137,7 @@ class RainBirdDriver extends Homey.Driver {
                     this.error('Error connecting to Rainbird', error);
                     return {
                         success: false,
-                        error,
+                        error: error instanceof Error ? error.message : String(error),
                     };
                 }
             }

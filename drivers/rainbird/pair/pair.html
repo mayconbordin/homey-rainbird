@@ -14,13 +14,19 @@
         };
 
         Homey.showLoadingOverlay();
-        Homey.emit('form_complete', data).then(function (result) {
-            Homey.hideLoadingOverlay();
+        Homey.emit('form_complete', data)
+            .then(function (result) {
+                Homey.hideLoadingOverlay();
 
-            if (result.success !== true) {
-                Homey.alert(`Failed to connect, please check the details in the form`, result.error);
-            }
-        });
+                if (result.success !== true) {
+                    var reason = result.error ? ': ' + result.error : ', please check the details in the form';
+                    Homey.alert('Failed to connect' + reason, 'error');
+                }
+            })
+            .catch(function (error) {
+                Homey.hideLoadingOverlay();
+                Homey.alert('Failed to connect: ' + (error && error.message ? error.message : error), 'error');
+            });
     }
 </script>
 
